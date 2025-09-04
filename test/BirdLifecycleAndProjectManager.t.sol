@@ -17,6 +17,7 @@ contract BirdLifecycleAndProjectManagerTest is Test {
     BirdLifecycleAndProjectManager manager;
 
     address alice = address(0x1);
+    address bob = address(0x2);
 
     function setUp() public {
         // Deploy token contracts
@@ -77,38 +78,6 @@ contract BirdLifecycleAndProjectManagerTest is Test {
             revert("MatureBirdNFT ownership transfer failed");
         }
 
-        // Handle Ownable2Step if applicable
-        // Uncomment if your token contracts use Ownable2Step
-        /*
-        vm.prank(address(manager));
-        try eggs.acceptOwnership() {
-            console.log("EggsToken ownership accepted");
-        } catch Error(string memory reason) {
-            console.log("EggsToken acceptOwnership failed:", reason);
-        }
-
-        vm.prank(address(manager));
-        try feeds.acceptOwnership() {
-            console.log("FeedsToken ownership accepted");
-        } catch Error(string memory reason) {
-            console.log("FeedsToken acceptOwnership failed:", reason);
-        }
-
-        vm.prank(address(manager));
-        try chicks.acceptOwnership() {
-            console.log("ChickToken ownership accepted");
-        } catch Error(string memory reason) {
-            console.log("ChickToken acceptOwnership failed:", reason);
-        }
-
-        vm.prank(address(manager));
-        try nft.acceptOwnership() {
-            console.log("MatureBirdNFT ownership accepted");
-        } catch Error(string memory reason) {
-            console.log("MatureBirdNFT acceptOwnership failed:", reason);
-        }
-        */
-
         // Verify ownership transfer
         assertEq(eggs.owner(), address(manager), "EggsToken ownership not transferred");
         assertEq(feeds.owner(), address(manager), "FeedsToken ownership not transferred");
@@ -135,6 +104,16 @@ contract BirdLifecycleAndProjectManagerTest is Test {
         (address ownerOfProject, , bool exists) = manager.projects(1);
         assertTrue(exists);
         assertEq(ownerOfProject, alice);
+        assertEq(manager.projectCount(), 1);
+        uint256[] memory projectIds = manager.getAllProjects();
+        assertEq(projectIds.length, 1);
+        assertEq(projectIds[0], 1);
+    }
+
+    function testCreateProjectInsufficientEggs() public {
+        vm.prank(bob);
+        vm.expectRevert("Insufficient eggs to create project");
+        manager.createProject();
     }
 
     function testPurchaseBasket() public {
@@ -146,6 +125,26 @@ contract BirdLifecycleAndProjectManagerTest is Test {
 
         uint256 available = manager.totalAvailableEggs(1);
         assertEq(available, 200 ether);
+        (, uint256 basketCount, ) = manager.projects(1);
+        assertEq(basketCount, 1);
+    }
+
+    function testPurchaseBasketNotOwner() public {
+        vm.prank(alice);
+        manager.createProject();
+
+        vm.prank(bob);
+        vm.expectRevert("Not project owner");
+        manager.purchaseBasket(1, 200 ether);
+    }
+
+    function testPurchaseBasketInsufficientEggs() public {
+        vm.prank(alice);
+        manager.createProject();
+
+        vm.prank(alice);
+        vm.expectRevert("Insufficient eggs");
+        manager.purchaseBasket(1, 2000 ether);
     }
 
     function testAssignEggs() public {
@@ -158,19 +157,48 @@ contract BirdLifecycleAndProjectManagerTest is Test {
         vm.prank(alice);
         manager.assignEggsToTask(1, 150 ether);
 
-        uint256 left = manager.totalAvailableEggs(1);
-        assertEq(left, 50 ether);
+        uint256 available = manager.totalAvailableEggs(1);
+        assertEq(available, 50 ether);
+    }
+
+    function testAssignEggsNotOwner() public {
+        vm.prank(alice);
+        manager.createProject();
+
+        vm.prank(alice);
+        manager.purchaseBasket(1, 200 ether);
+
+        vm.prank(bob);
+        vm.expectRevert("Not project owner");
+        manager.assignEggsToTask(1, 150 ether);
+    }
+
+    function testAssignEggsInsufficientEggs() public {
+        vm.prank(alice);
+        manager.createProject();
+
+        vm.prank(alice);
+        manager.purchaseBasket(1, 200 ether);
+
+        vm.prank(alice);
+        vm.expectRevert("Not enough eggs available");
+        manager.assignEggsToTask(1, 250 ether);
     }
 
     function testHatchFeedAndMatureLifecycle() public {
-        vm.prank(address(manager));
+        // Call hatchEgg as the owner (test contract)
+        vm.prank(address(this));
         manager.hatchEgg(alice, "peacock", "ipfs://metadata/peacock", 1);
 
         uint256 chicksCount = manager.getChicksCount(alice);
         assertEq(chicksCount, 1);
 
-        // Warp time past incubation
-        vm.warp(block.timestamp + 4 days);
+        (uint256 hatchedTimestamp, , uint256 feedingsCount, string memory species, string memory metadataURI, bool exists) = manager.getChickInfo(alice, 0);
+        assertTrue(exists);
+        assertEq(species, "peacock");
+        assertEq(metadataURI, "ipfs://metadata/peacock");
+        assertEq(feedingsCount, 0);
+        assertEq(hatchedTimestamp, block.timestamp);
 
         // Feed 5 times
         for (uint256 i = 0; i < 5; i++) {
@@ -182,13 +210,93 @@ contract BirdLifecycleAndProjectManagerTest is Test {
             manager.feedChick(0);
         }
 
+        (, , feedingsCount, , , ) = manager.getChickInfo(alice, 0);
+        assertEq(feedingsCount, 5);
+
+        // Warp time past incubation
+        vm.warp(block.timestamp + 4 days);
+
         vm.prank(alice);
         manager.matureChick(0);
 
-        (, , , , , bool exists) = manager.getChickInfo(alice, 0);
+        (, , , , , exists) = manager.getChickInfo(alice, 0);
         assertFalse(exists);
 
         // Check NFT ownership for tokenId 1
         assertEq(nft.ownerOf(1), alice);
+    }
+
+    function testHatchEggZeroChicks() public {
+        // Call hatchEgg as the owner (test contract)
+        vm.prank(address(this));
+        vm.expectRevert("Must hatch at least one chick");
+        manager.hatchEgg(alice, "peacock", "ipfs://metadata/peacock", 0);
+    }
+
+    function testFeedChickInvalidIndex() public {
+        vm.prank(alice);
+        vm.expectRevert("Invalid index");
+        manager.feedChick(0);
+    }
+
+    function testFeedChickInsufficientFeeds() public {
+        // Call hatchEgg as the owner (test contract)
+        vm.prank(address(this));
+        manager.hatchEgg(alice, "peacock", "ipfs://metadata/peacock", 1);
+
+        vm.prank(alice);
+        vm.expectRevert("Insufficient feeds");
+        manager.feedChick(0);
+    }
+
+    function testMatureChickPremature() public {
+        // Call hatchEgg as the owner (test contract)
+        vm.prank(address(this));
+        manager.hatchEgg(alice, "peacock", "ipfs://metadata/peacock", 1);
+
+        vm.prank(alice);
+        vm.expectRevert("Incubation not complete");
+        manager.matureChick(0);
+    }
+
+    function testMatureChickInsufficientFeedings() public {
+        // Call hatchEgg as the owner (test contract)
+        vm.prank(address(this));
+        manager.hatchEgg(alice, "peacock", "ipfs://metadata/peacock", 1);
+
+        vm.warp(block.timestamp + 4 days);
+
+        vm.prank(alice);
+        vm.expectRevert("Insufficient feeding");
+        manager.matureChick(0);
+    }
+
+    function testSetConfig() public {
+        // Call configuration setters as the owner (test contract)
+        vm.prank(address(this));
+        manager.setIncubationPeriod(5 days);
+        assertEq(manager.incubationPeriod(), 5 days);
+
+        vm.prank(address(this));
+        manager.setFeedsPerFeeding(20 ether);
+        assertEq(manager.feedsPerFeeding(), 20 ether);
+
+        vm.prank(address(this));
+        manager.setProjectCreationCost(200 ether);
+        assertEq(manager.projectCreationCost(), 200 ether);
+    }
+
+    function testSetConfigNotOwner() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        manager.setIncubationPeriod(5 days);
+
+        vm.prank(alice);
+        vm.expectRevert();
+        manager.setFeedsPerFeeding(20 ether);
+
+        vm.prank(alice);
+        vm.expectRevert();
+        manager.setProjectCreationCost(200 ether);
     }
 }
